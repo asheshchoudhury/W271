@@ -1,0 +1,275 @@
+---
+title: "W271 Lab3 Submission"
+author: "Ashesh Choudhury"
+date: "Fall 2018"
+output:
+  word_document: default
+  html_notebook: default
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r}
+# Insert the function to *tidy up* the code when they are printed out
+library(knitr)
+opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE)
+
+# Clean up the workspace before we begin
+rm(list = ls())
+
+# Set working directory
+wd <- "C:/Users/ashesh/Desktop/Data science prep/MIDS/MIDS Study material/W271/Lab3"
+setwd(wd)
+# Load libraries
+install.packages("xts", repos="http://cloud.r-project.org")
+library(xts)
+library(forecast)
+library(astsa)
+library(dplyr)
+library(Hmisc)
+```
+
+```{r}
+df <- read.csv("https://raw.githubusercontent.com/MIDS-W271/main-f18/e5dafd9afeb57f1f862f5561a3fcb535480b364c/labs/lab3/ECOMPCTNSA.csv?token=AhtFYcA1jdroQ1uy4ywPurn4YdW0mXdQks5cAcCUwA%3D%3D", header = TRUE, sep=",")
+
+  str(df)
+  head(df)
+  describe(df$ECOMPCTNSA)
+  
+# Create an R time-series object
+fp <- ts(df$ECOMPCTNSA, frequency = 4, start = c(1999,1))
+  str(fp)
+  head(fp)
+
+plot.ts(fp,  main = "ECommerce retail sales as % of total sales")
+
+# Lets keep data between 2015 and 2016. Let's hold out 2015 as test data that you can use later.
+
+fp.training <- fp[time(fp) > 1999 & time(fp) < 2015]
+fp.training <- ts(fp.training, frequency = 4, start = c(2000,1))
+  str(fp.training)
+  head(fp.training, 10)
+    
+fp.test <- fp[time(fp) >= 2015]
+fp.test <- ts(fp.test, frequency = 4, start = c(2015,1))
+  str(fp.test)
+  head(fp.test, 10)
+```
+
+As we can see below, this time-series is clearly not stationary in the mean, and it is also pretty apparent that the time-series exhibits a lot of seasonality. 
+
+```{r}
+plot(fp.training, 
+      main = "ECommerce retail sales as % of total sales for 2000-2014 (Training Series)")
+hist(fp.training)
+acf(fp.training, lag.max = 24)
+pacf(fp.training, lag.max = 24)
+acf(fp.training, lag.max = 60)
+pacf(fp.training, lag.max = 60)
+
+# We can also use autoplot, ggAcf, and ggPacf
+autoplot(fp.training) + xlab("Year") + ylab("ECommerce retail sales as % of total sales for 2000-2014 (Training Series)")
+ggAcf(fp.training, lag.max=60, main="ECommerce retail sales as % of total sales for 2000-2014 (Training Series)")
+ggPacf(fp.training, lag.max=60, main="ECommerce retail sales as % of total sales for 2000-2014 (Training Series)")
+
+# Another (more concise) way is to use ggtsdisplay()
+fp.training %>%
+  ggtsdisplay()
+```
+
+```{r}
+monthplot(fp.training)
+```
+
+Let's examining some differencing-transformation of the series:
+  - seasonal differencing
+  - non-seasonal differencing
+  - non-seasonal differencing on top of seasonal differencing
+
+```{r}
+fp.training %>% diff(lag=1) %>% ggtsdisplay()
+fp.training %>% diff(lag=4) %>% ggtsdisplay()
+fp.training %>% diff(lag=4) %>% monthplot()
+
+fp.training %>% diff(lag=1) %>% diff(lag=4) %>% ggtsdisplay()
+
+fp.training %>% diff(lag=4) %>% diff(lag=1) %>% ggtsdisplay()
+```
+
+# Modeling the non-seasonal component
+First, let's model the non-seasonal component of the raw series. In order to do that, we are going to use the ```Arima``` function in the forecast package. I am making the extra steps of modeling the non-seasonal component as pure AR and MA processes first, for illustrative purposes. Based on the ACF and PACF charts, I expect that we can model the non-seasonal component with an ARIMA(0,1,1) or ARIMA(0,1,2).
+
+```{r}
+
+# Let's start by modeling it as a pure AR process
+for (p in 0:5){
+  mod <- Arima(fp.training, order = c(p,0,0),
+               seasonal = list(order = c(0,0,0),4),
+               method = "ML")
+  print(c(p, mod$aic, mod$bic))
+}
+```
+
+The AIC is minimized when p = 5 and BIC is minimized when p  = 5. Let's examine the residuals of each model.
+
+```{r}
+modtest <- Arima(fp.training, order = c(5,0,0),
+                 seasonal = list(order = c(0,0,0),4),
+                 method = "ML")
+modtest
+hist(modtest$residuals)
+acf(modtest$residuals, lag.max = 12)
+pacf(modtest$residuals, lag.max = 12)
+
+modtest <- Arima(fp.training, order = c(5,0,0),
+                 seasonal = list(order = c(0,1,0),4),
+                 method = "ML")
+modtest
+hist(modtest$residuals)
+acf(modtest$residuals, lag.max = 12)
+pacf(modtest$residuals, lag.max = 12)
+```
+
+Both models do a decent job of eliminating lower-ordered correlated residuals, though they do not eliminate any of the seasonality, which is to be expected given that we have taken no steps to model the seasonal component (yet)!
+
+Now, let's model the data as a pure MA process.
+```{r}
+for (q in 0:5){
+  mod <- Arima(fp.training, order = c(0,1,q),
+               seasonal = list(order = c(0,1,0),4),
+               method = "ML")
+  print(c(q, mod$aic, mod$bic))
+}
+```
+
+Both the AIC and BIC are minimized when q = 1. Note that the AIC and BIC values for an ARIMA(0,1,1) are lower than any of the pure AR models we examined above. Again, this is consistent with what we expected given our visual examination of the ACF and PACF charts.
+
+Now, we need to find an appriorate ARIMA(p,1,q) model. Based on the principle of parsimony, I expect that p = 0 and q = 1 (p + q < min(p',q') where p' and q' are the orders of a pure AR and MA process respectively.)
+
+
+An ARIMA(0,1,1) does a decent job of removing dependency in the non-seasonal component of the data. We might choose to explore a more complicated model to see if does an even better job of generating well behaved residuals. As you can see below, the residuals look very similar to those generated by the simpler model.
+
+```{r}
+for(P in 0:1){
+  for(Q in 0:1){
+      mod <- Arima(fp.training, order = c(0,0,1),
+               seasonal = list(order = c(P,0,Q),4),
+               method = "ML")
+
+      print(c(P, Q, mod$aic, mod$bic))
+  }
+}
+
+season.model1 <- Arima(fp.training, order = c(0,1,1),
+                       seasonal = list(order = c(0,1,1), 4),
+                       method = "ML")
+
+season.model1
+hist(season.model1$residuals)
+plot.ts(season.model1$residuals)
+acf(season.model1$residuals, lag.max = 12)
+pacf(season.model1$residuals, lag.max = 12)
+
+# Let's conduct some formal tests.
+
+# Let's examine normality
+shapiro.test(season.model1$residuals)
+qqnorm(season.model1$residuals)
+qqline(season.model1$residuals)
+
+# Box-Ljung test
+Box.test(season.model1$residuals, type = "Ljung-Box")
+```
+
+The residuals generated from this model rejects the null hypothesis that they are generated from a normal distribution. Bear in mind that this test is really sensitive so we should not solely base our evaluation of the model on this test. 
+
+
+# In sample forecasting for 2015 and 2016
+
+```{r}
+par(mfrow=c(1,1))
+futurVal <- forecast(season.model1,h=5, level=c(95))
+plot(futurVal,main = "In sample forecasting for 2015-2016, Hold out set(Red) vs. Forecast (Blue)", xatn = "n")
+lines(fp.test, col = "red")
+```
+
+
+# Out sample forecasting for 2017  
+
+```{r}
+par(mfrow=c(1,1))
+futurVal1 <- forecast(season.model1,h=9, level=c(95))
+plot(futurVal1,main = "Out sample forecasting for 2017")
+```
+
+# 1. Read AMAZ.csv and UMCSENT.csv into R as R DataFrames
+
+# 2. Convert them to xts objects
+
+```{r}
+df1 <- read.csv("https://raw.githubusercontent.com/MIDS-W271/main-f18/e5dafd9afeb57f1f862f5561a3fcb535480b364c/labs/lab3/AMAZ.csv?token=AhtFYQ_40dG2ZWsetcVyOu47H2a_F_twks5cAuVcwA%3D%3D", header=TRUE, stringsAsFactors = FALSE)
+str(df1)
+names(df1)
+head(df1,5)
+tail(df1,5)
+df2 <- read.csv("https://raw.githubusercontent.com/MIDS-W271/main-f18/e5dafd9afeb57f1f862f5561a3fcb535480b364c/labs/lab3/UMCSENT.csv?token=AhtFYeW-O3b8agqFzIzVFjRTbg9mhFxzks5cAuWXwA%3D%3D", header=TRUE, stringsAsFactors = FALSE)
+str(df2)
+names(df2)
+head(df2,5)
+tail(df2,5)
+unemp_idx2 <- seq(as.Date("1978/1/1"), by = "month", length.out = 
+length(df2[,1]))
+head(unemp_idx2)
+df2_xts <- xts(df2$UMCSENT, order.by = unemp_idx2)
+str(df2_xts)
+head(df2_xts)
+unemp_idx1 <- seq(as.Date("2007/1/3"), by = "day", length.out = length(df1[, 
+    1]))
+df1_xts <- xts(df1, order.by = unemp_idx1)
+
+```
+# 3. Merge the two set of series together, perserving all of the obserbvations in both set of series.
+# a. fill all of the missing values of the UMCSENT series with -9999
+```{r}
+unemp01 <- merge(df1_xts, df2_xts, join = "outer" , fill = -9999)
+str(unemp01)
+head(unemp01)
+```
+# b. then create a new series, named UMCSENT02, from the original  UMCSENT series replace all of the -9999 with NAs
+```{r}
+unemp02 <- unemp01
+head(unemp02)
+describe(unemp02$df2_xts)
+unemp02[unemp02 <= -9999] <- NA
+head(cbind(unemp01$df2_xts['2001-01-01/2018-12-15'], unemp02$df2_xts['2001-01-01/2018-12-15']),100)
+```
+# c. then create a new series, named UMCSENT03, and replace the NAs with the last observation
+```{r}
+unemp03 <- unemp02
+describe(unemp03$df2_xts)
+unemp03 <- na.locf(unemp02, option = "locf", na.remaining = "rev") 
+head(cbind(unemp01$df2_xts['2001-01-01/2018-12-30'],unemp02$df2_xts['2001-01-01/2018-12-30'],unemp03$df2_xts['2001-01-01/2018-12-30']),100)
+```
+# d. then create a new series, named UMCSENT04, and replace the NAs using linear interpolation.
+
+```{r}
+unemp04 <- unemp02
+unemp04 <- na.approx(unemp04, maxgap=31)
+head(round(cbind(unemp01$df2_xts['2001-01-01/2018-12-30'],unemp02$df2_xts['2001-01-01/2018-12-30'],unemp03$df2_xts['2001-01-01/2018-12-30'],unemp04$df2_xts['2001-01-01/2018-12-30']),1),100)
+```
+
+# 4. Calculate the daily return of the Amazon closing price (AMAZ.close), where daily return is defined as $(x(t)-x(t-1))/x(t-1)$. Plot the daily return series.
+
+```{r}
+plot((diff(unemp01$AMAZ.Close['2007-01-03/2013-01-15'], Lag=1 , difference=1 , log = FALSE, na.pad = TRUE)/unemp01$AMAZ.Close[-nrow(unemp01$AMAZ.Close),]),main = "Amazon Daily Return", type = "p", col = "red")
+```
+
+
+# Create a 20-day and a 50-day rolling mean series from the AMAZ.close series.
+```{r}
+head(df1,10)
+head(cbind(df1_xts[,5], rollapply(df1_xts[,5], 20, FUN = mean, na.rm = TRUE,fill = NA)),30)
+head(cbind(df1_xts[,5], rollapply(df1_xts[,5], 50, FUN = mean, na.rm = TRUE,fill = NA)),70)
+```
+
